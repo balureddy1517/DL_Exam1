@@ -35,8 +35,9 @@ DATA_DIR = os.getcwd() + os.path.sep + 'Data' + os.path.sep
 sep = os.path.sep
 os.chdir(OR_PATH) # Come back to the folder where the code resides , all files will be left on this directory
 
-n_epoch = 1
+n_epoch = 10
 BATCH_SIZE = 2
+AUGMENT_TIMES = 3
 
 ## Image processing
 CHANNELS = 3
@@ -99,6 +100,17 @@ def process_target(target_type):
     return class_names
 #------------------------------------------------------------------------------------------------------------------
 
+
+def augment_image(image):
+    # Example augmentations: flip, adjust brightness, rotation
+    image = tf.image.random_flip_left_right(image)
+    image = tf.image.random_brightness(image, max_delta=0.2)
+    image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+    image = image / 255.0  # Rescale the image to be between 0 and 1
+
+    # Ensure the pixel values are clipped between 0 and 1 in case the augmentations push them out of bounds
+    image = tf.clip_by_value(image, 0.0, 1.0)
+    return image
 def process_path(feature, target):
     '''
           feature is the path and id of the image
@@ -109,18 +121,53 @@ def process_path(feature, target):
     label = target
 
     file_path = feature
+    print(feature)
+    print(label.shape)
     img = tf.io.read_file(file_path)
+
+
 
     img = tf.io.decode_image(img, channels=CHANNELS, expand_animations=False)
 
+
     img = tf.image.resize( img, [IMAGE_SIZE, IMAGE_SIZE])
+
 
     # augmentation
 
-    img = tf.reshape(img, [-1])
+
+    # img = tf.reshape(img, [-1])
+
 
     return img, label
 
+
+def augment_if_needed(image_path, label):
+    # Check the argmax of the label
+    label_argmax = tf.argmax(label)
+
+    # Use tf.reduce_any with tf.equal to check if label_argmax is in [3, 4, 5]
+    augment_condition = tf.reduce_any(tf.equal(label_argmax, [3, 4, 5]))
+
+    def augment_images():
+        img, lbl = process_path(image_path, label)  # Image in 3D shape
+        augmented_images = [(img, lbl)]
+
+        for _ in range(AUGMENT_TIMES):
+            aug_img = augment_image(img)  # Augment in 3D shape
+            augmented_images.append((aug_img, lbl))
+
+        # Reshape after augmentations if needed
+        images = tf.stack([tf.reshape(x[0], [-1]) for x in augmented_images])  # Flattened image
+        labels = tf.stack([x[1] for x in augmented_images])
+        return tf.data.Dataset.from_tensor_slices((images, labels))
+
+    def return_original():
+        img, lbl = process_path(image_path, label)
+        img = tf.reshape(img, [-1])  # Flatten the image for model input
+        return tf.data.Dataset.from_tensors((img, lbl))
+
+    return tf.cond(augment_condition, augment_images, return_original)
 
 
 #------------------------------------------------------------------------------------------------------------------
@@ -141,11 +188,29 @@ def get_target(num_classes):
 
     y_target = np.array(end[1:])
 
+
     return y_target
 #------------------------------------------------------------------------------------------------------------------
-
-
 def read_data(num_classes):
+    '''
+          reads the dataset and process the target
+    '''
+
+    ds_inputs = np.array(DATA_DIR + xdf_dset['id'])
+    ds_targets = get_target(num_classes)
+
+
+    list_ds = tf.data.Dataset.from_tensor_slices((ds_inputs,ds_targets)) # creates a tensor from the image paths and targets
+
+
+
+    # final_ds = list_ds.map(process_path, num_parallel_calls=AUTOTUNE).batch(BATCH_SIZE)
+    augmented_dataset = list_ds.flat_map(lambda image_path, label: augment_if_needed(image_path, label))
+    final_ds = augmented_dataset.batch(BATCH_SIZE)
+
+    return final_ds
+
+def test_read_data(num_classes):
     '''
           reads the dataset and process the target
     '''
@@ -155,9 +220,39 @@ def read_data(num_classes):
 
     list_ds = tf.data.Dataset.from_tensor_slices((ds_inputs,ds_targets)) # creates a tensor from the image paths and targets
 
-    final_ds = list_ds.map(process_path, num_parallel_calls=AUTOTUNE).batch(BATCH_SIZE)
+    final_ds = list_ds.map(test_process_path, num_parallel_calls=AUTOTUNE).batch(BATCH_SIZE)
 
     return final_ds
+
+def test_process_path(feature, target):
+    '''
+          feature is the path and id of the image
+          target is the result
+          returns the image and the target as label
+    '''
+
+    label = target
+
+    file_path = feature
+    print(feature)
+    print(label.shape)
+    img = tf.io.read_file(file_path)
+
+
+
+    img = tf.io.decode_image(img, channels=CHANNELS, expand_animations=False)
+
+
+    img = tf.image.resize( img, [IMAGE_SIZE, IMAGE_SIZE])
+
+
+    # augmentation
+
+
+    img = tf.reshape(img, [-1])
+
+
+    return img, label
 #------------------------------------------------------------------------------------------------------------------
 
 def save_model(model):
@@ -173,19 +268,35 @@ def model_definition():
     # Define a Keras sequential model
     model = tf.keras.Sequential()
 
-    # Define the first dense layer
-    model.add(tf.keras.layers.Dense(300, activation='relu', input_shape=(INPUTS_r,)))
-    model.add(tf.keras.layers.Dense(200, activation='relu'))
-    model.add(tf.keras.layers.Dense(100, activation='relu'))
-    model.add(tf.keras.layers.Dense(100, activation='relu'))
-    model.add(tf.keras.layers.Dense(80, activation='relu'))
-    model.add(tf.keras.layers.Dense(50, activation='relu'))
+    # First dense layer with more neurons and batch normalization
+    model.add(tf.keras.layers.Dense(512, activation='relu', input_shape=(INPUTS_r,)))
+    model.add(tf.keras.layers.BatchNormalization())  # Batch Normalization
+    model.add(tf.keras.layers.Dropout(0.5))  # Dropout layer with 50% rate
 
-    model.add(tf.keras.layers.Dense(OUTPUTS_a, activation='softmax')) #final layer , outputs_a is the number of targets
+    # Additional layers with increased neurons and regularization
+    model.add(tf.keras.layers.Dense(256, activation='relu'))
+    model.add(tf.keras.layers.BatchNormalization())  # Batch Normalization
+    model.add(tf.keras.layers.Dropout(0.5))  # Dropout layer with 50% rate
 
-    model.compile(optimizer='RMSprop', loss='categorical_crossentropy', metrics=['accuracy'])
+    model.add(tf.keras.layers.Dense(128, activation='relu'))
+    model.add(tf.keras.layers.BatchNormalization())
+    model.add(tf.keras.layers.Dropout(0.5))
 
-    save_model(model) #print Summary
+    model.add(tf.keras.layers.Dense(64, activation='relu'))
+    model.add(tf.keras.layers.BatchNormalization())
+    model.add(tf.keras.layers.Dropout(0.5))
+
+    # Final layer, OUTPUTS_a is the number of targets (softmax for classification)
+    model.add(tf.keras.layers.Dense(OUTPUTS_a, activation='softmax'))
+
+    # Use SGD with momentum
+    optimizer = tf.keras.optimizers.SGD(learning_rate=0.001, momentum=0.9)
+
+    # Compile the model with the SGD optimizer and categorical crossentropy loss
+    model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+
+
+    save_model(model)  # Save model summary to a file
     return model
 #------------------------------------------------------------------------------------------------------------------
 
@@ -199,7 +310,9 @@ def train_func(train_ds):
     final_model = model_definition()
 
     #final_model.fit(train_ds,  epochs=n_epoch, callbacks=[early_stop, check_point])
-    final_model.fit(train_ds,  epochs=n_epoch, callbacks=[check_point])
+    # final_model.fit(train_ds,  epochs=n_epoch, callbacks=[check_point])
+    final_model.fit(train_ds, epochs=n_epoch, callbacks=[check_point], batch_size=32)
+
 
 #------------------------------------------------------------------------------------------------------------------
 
@@ -314,19 +427,23 @@ def main():
     ## Processing Train dataset
 
     xdf_dset = xdf_data[xdf_data["split"] == 'train'].copy()
-
+    print(len(xdf_dset))
+    class_counts = xdf_dset['target'].value_counts()
+    print(class_counts)
+    #
     train_ds = read_data( OUTPUTS_a )
+
     train_func(train_ds)
 
     # Preprocessing Test dataset
 
     xdf_dset = xdf_data[xdf_data["split"] == 'test'].copy()
 
-    test_ds= read_data(OUTPUTS_a)
+    test_ds= test_read_data(OUTPUTS_a)
     predict_func(test_ds)
 
     ## Metrics Function over the result of the test dataset
-    list_of_metrics = ['f1_macro', 'coh']
+    list_of_metrics = ['f1_macro', 'coh','acc']
     list_of_agg = ['avg']
     metrics_func(list_of_metrics, list_of_agg)
 
