@@ -16,14 +16,14 @@ batch_size = 64
 num_epochs = 50
 dropout_rate = 0.2
 image_size = 64
-patch_size = 16
+patch_size = 8
 num_patches = (image_size // patch_size) ** 2
 embedding_dim = 256
 num_blocks = 4
 num_classes = 5
 input_shape = (64, 64, 3)
 learning_rate = 0.001
-model_name='mixer'
+model_name='Dean'
 
 
 
@@ -71,6 +71,7 @@ def get_target():
 # Read data from the dataset
 def read_data():
     ds_inputs = np.array(DATA_DIR + xdf_dset['id'])
+    print("unique split",xdf_dset['split'].unique())
     ds_targets = get_target()
 
     images = []
@@ -121,7 +122,7 @@ def metrics_func(metrics, aggregates=[]):
 
     # Aggregate metrics
     xsum = 0
-    xcont = 0
+    xcont = 1
 
     for xm in metrics:
         if xm == 'f1_micro':
@@ -325,6 +326,7 @@ class MLPMixerLayer(layers.Layer):
 
         self.mlp1 = keras.Sequential(
             [
+                layers.BatchNormalization(),
                 layers.Dense(units=num_patches, activation="gelu"),
                 layers.Dense(units=num_patches),
                 layers.Dropout(rate=dropout_rate),
@@ -332,6 +334,7 @@ class MLPMixerLayer(layers.Layer):
         )
         self.mlp2 = keras.Sequential(
             [
+                layers.BatchNormalization(),
                 layers.Dense(units=num_patches, activation="gelu"),
                 layers.Dense(units=hidden_units),
                 layers.Dropout(rate=dropout_rate),
@@ -358,7 +361,7 @@ class MLPMixerLayer(layers.Layer):
 OR_PATH = os.getcwd()
 os.chdir("..")
 PATH = os.getcwd()
-DATA_DIR = os.path.join(PATH, 'Data-copy') + os.path.sep
+DATA_DIR = os.path.join(PATH, 'Data') + os.path.sep
 os.chdir(OR_PATH)
 
 # Load data from excel
@@ -384,6 +387,7 @@ mlpmixer_blocks = keras.Sequential(
     [MLPMixerLayer(num_patches, embedding_dim, dropout_rate) for _ in range(num_blocks)]
 )
 mlpmixer_classifier = build_classifier(mlpmixer_blocks)
+
 
 # Run the experiment
 history = run_experiment(mlpmixer_classifier,model_name)
